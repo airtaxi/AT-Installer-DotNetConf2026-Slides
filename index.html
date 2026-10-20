@@ -1,0 +1,1690 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>.NET으로 만드는 MSIX 인스톨러 자동화</title>
+
+<!-- ===== FONTS: IBM Plex Sans KR (본문) + IBM Plex Mono (코드, 파일 이름, 식별자) ===== -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=IBM+Plex+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+
+<style>
+/* ===========================================
+   THEME: 택배 상자 위의 배송 라벨
+   색과 글꼴은 이 변수만 바꾸면 덱 전체에 반영됩니다.
+   =========================================== */
+:root {
+    --stage-bg: #3a2c1e;          /* 레터박스 영역 */
+    --slide-bg: #b98c5c;          /* 골판지 상자 */
+    --label: #fbfbf8;             /* 라벨 용지 */
+    --ink: #121212;               /* 인쇄 잉크 */
+    --ink-soft: #55534e;          /* 보조 텍스트 */
+    --ink-faint: #8d8a82;         /* 필드 이름, 주석 */
+    --red: #c8321e;               /* 취급 주의 스탬프: 경고와 핵심 강조에만 사용 */
+    --code-keyword: #e0a96d;      /* 코드 키워드 */
+    --code-string: #b9cba8;       /* 코드 문자열 */
+    --code-comment: #8d8a82;      /* 코드 주석 */
+    --font-body: 'IBM Plex Sans KR', sans-serif;
+    --font-mono: 'IBM Plex Mono', 'IBM Plex Sans KR', monospace;
+    --rule: 3px solid var(--ink); /* 라벨 칸을 나누는 선 */
+    --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* ===========================================
+   FIXED 16:9 STAGE: MANDATORY BASE (viewport-base.css)
+   =========================================== */
+html,
+body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: var(--stage-bg, #000);
+}
+.deck-viewport {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    background: var(--stage-bg, #000);
+}
+.deck-stage {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    transform-origin: 0 0;
+    background: var(--slide-bg, #fff);
+}
+.slide {
+    position: absolute;
+    inset: 0;
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    display: block;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    background: var(--slide-bg, #fff);
+}
+.slide.active,
+.slide.visible {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    z-index: 1;
+}
+img,
+video,
+canvas,
+svg {
+    max-width: 100%;
+    max-height: 100%;
+}
+.deck-controls {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    z-index: 1000;
+}
+@media print {
+    html,
+    body {
+        width: 1920px;
+        height: auto;
+        overflow: visible;
+        background: #fff;
+    }
+    .deck-viewport {
+        position: static;
+        overflow: visible;
+        background: #fff;
+    }
+    .deck-stage {
+        position: static;
+        width: auto;
+        height: auto;
+        transform: none !important;
+        background: none;
+    }
+    .slide {
+        position: relative;
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+        width: 1920px;
+        height: 1080px;
+        break-after: page;
+        page-break-after: always;
+    }
+    .slide:last-child {
+        break-after: auto;
+        page-break-after: auto;
+    }
+    .deck-controls {
+        display: none !important;
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.2s !important;
+    }
+}
+
+/* ===========================================
+   ENTRANCE: 슬라이드가 바뀔 때 라벨이 상자에 붙는 한 번의 움직임
+   =========================================== */
+.label {
+    opacity: 0;
+    transform: translateY(14px);
+    transition: opacity .5s var(--ease-out-expo), transform .5s var(--ease-out-expo);
+}
+.slide.visible .label { opacity: 1; transform: none; }
+@media print { .label { opacity: 1 !important; transform: none !important; } }
+
+/* ===========================================
+   LABEL FRAME: 모든 슬라이드의 기본 틀
+   머리 칸(구간 이름, 쪽 번호)과 본문으로 나뉩니다.
+   =========================================== */
+.slide { font-family: var(--font-body); color: var(--ink); }
+.label {
+    position: absolute;
+    left: 96px;
+    top: 64px;
+    width: 1728px;
+    height: 952px;
+    background: var(--label);
+    border: 4px solid var(--ink);
+    box-shadow: 0 10px 24px rgba(40, 26, 12, 0.28);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 92px minmax(0, 1fr);
+}
+.label-head { display: grid; grid-template-columns: 1fr 220px; border-bottom: var(--rule); }
+.label-head > div { padding: 16px 32px; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+.label-head > div + div { border-left: var(--rule); }
+.key { font-size: 20px; font-weight: 500; color: var(--ink-faint); line-height: 1.2; }
+.label-head .value { font-size: 26px; font-weight: 700; line-height: 1.2; }
+.label-head .page { font-family: var(--font-mono); font-size: 26px; font-weight: 700; }
+.label-body { padding: 48px 64px 52px; display: flex; flex-direction: column; gap: 34px; min-height: 0; min-width: 0; }
+
+/* ===========================================
+   TYPOGRAPHY
+   =========================================== */
+h2 { font-size: 54px; font-weight: 700; line-height: 1.22; letter-spacing: -0.025em; }
+.lede { font-size: 30px; line-height: 1.55; color: var(--ink-soft); }
+.lede b, .cell b, td b { color: var(--ink); font-weight: 700; }
+.mono, code { font-family: var(--font-mono); font-weight: 500; letter-spacing: -0.01em; }
+p code, li code, td code, .cell code, .lede code { font-size: 0.92em; background: #ecebe5; padding: 0 8px; border-radius: 4px; }
+.ink code, .section-label .name code { background: rgba(251, 251, 248, 0.16); color: inherit; }
+.note { font-size: 22px; color: var(--ink-faint); line-height: 1.5; }
+.red { color: var(--red); }
+
+/* ===========================================
+   FIELDS: 라벨 칸 격자 (key 와 value)
+   열 개수는 .cols-2, .cols-3, .cols-4 로 정합니다.
+   =========================================== */
+.fields { display: grid; border: var(--rule); }
+.fields.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.fields.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.fields.cols-4 { grid-template-columns: repeat(4, 1fr); }
+.fields .cell { padding: 24px 28px; display: flex; flex-direction: column; gap: 10px; border-right: var(--rule); border-bottom: var(--rule); }
+.fields.cols-2 .cell:nth-child(2n), .fields.cols-3 .cell:nth-child(3n), .fields.cols-4 .cell:nth-child(4n) { border-right: none; }
+.fields .cell.no-bottom { border-bottom: none; }
+.cell .value { font-size: 30px; font-weight: 700; line-height: 1.3; }
+.cell p { font-size: 25px; line-height: 1.5; color: var(--ink-soft); }
+.cell.ink { background: var(--ink); color: var(--label); }
+.cell.ink .key { color: #b9b7b0; }
+.cell.ink p { color: #d9d7d0; }
+
+/* ===========================================
+   TABLE: 굵은 선으로 행을 나누는 표
+   =========================================== */
+.tbl { width: 100%; border-collapse: collapse; border: var(--rule); font-size: 27px; }
+.tbl th { text-align: left; font-size: 21px; font-weight: 500; color: var(--ink-faint); padding: 14px 24px; border-bottom: var(--rule); background: #f1f0eb; }
+.tbl td { padding: 18px 24px; border-bottom: 2px solid #d6d4cd; line-height: 1.45; vertical-align: top; }
+.tbl tr:last-child td { border-bottom: none; }
+.tbl td + td, .tbl th + th { border-left: 2px solid #d6d4cd; }
+.tbl tr.hot td { background: #f6e3dc; }
+.tbl .num { font-family: var(--font-mono); font-weight: 700; white-space: nowrap; }
+
+/* ===========================================
+   CODE: 잉크 바탕 코드 블록
+   .kw 키워드, .st 문자열, .cm 주석, .hl 강조 줄
+   =========================================== */
+pre.code { flex-shrink: 0; background: var(--ink); color: var(--label); font-family: var(--font-mono); font-size: 23px; line-height: 1.55; padding: 28px 34px; white-space: pre; overflow: hidden; }
+pre.code.small { font-size: 21px; line-height: 1.5; }
+pre.code .kw { color: var(--code-keyword); }
+pre.code .st { color: var(--code-string); }
+pre.code .cm { color: var(--code-comment); }
+pre.code .hl { display: inline-block; width: 100%; background: rgba(251, 251, 248, 0.12); margin: 0 -34px; padding: 0 34px; box-sizing: content-box; }
+.code-caption { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: -22px; }
+.code-caption .mono { font-size: 22px; color: var(--ink-soft); }
+
+/* ===========================================
+   LAYOUT HELPERS
+   =========================================== */
+.row { display: grid; gap: 40px; min-height: 0; }
+.row.half { grid-template-columns: 1fr 1fr; }
+.row.wide-left { grid-template-columns: 1.35fr 1fr; }
+.row.wide-right { grid-template-columns: 1fr 1.35fr; }
+.stack { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
+.list { list-style: none; display: flex; flex-direction: column; gap: 16px; }
+.list li { font-size: 28px; line-height: 1.5; padding-left: 30px; position: relative; color: var(--ink-soft); }
+.list li::before { content: ""; position: absolute; left: 4px; top: 0.62em; width: 12px; height: 12px; background: var(--ink); }
+.list li b { color: var(--ink); }
+.push { margin-top: auto; }
+
+/* 취급 주의 스탬프: 한 슬라이드의 핵심 한 줄에만 사용 */
+.stamp { border: 4px solid var(--red); color: var(--red); padding: 18px 28px; font-size: 30px; font-weight: 700; line-height: 1.4; align-self: flex-start; }
+.stamp .mono { font-weight: 700; }
+
+/* 흐름: 칸을 화살표로 잇는 가로 흐름 */
+.flow { display: flex; align-items: stretch; gap: 0; }
+.flow .step { flex: 1; border: var(--rule); padding: 22px 22px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.flow .step .value { font-size: 26px; font-weight: 700; line-height: 1.3; }
+.flow .step p { font-size: 21px; line-height: 1.45; color: var(--ink-soft); }
+.flow .step.ink { background: var(--ink); color: var(--label); }
+.flow .step.ink p { color: #d9d7d0; }
+.flow .step.ink .key { color: #b9b7b0; }
+.flow.tall .step { padding: 34px 28px; gap: 14px; }
+.flow.tall .step .value { font-size: 30px; }
+.flow.tall .step p { font-size: 24px; }
+.fields.roomy .cell { padding: 40px 36px; gap: 16px; }
+.fields.roomy .cell .value { font-size: 36px; }
+.fields.roomy .cell p { font-size: 27px; }
+.flow .arrow { width: 44px; flex: 0 0 44px; display: flex; align-items: center; justify-content: center; }
+.flow .arrow svg { width: 30px; height: 30px; }
+
+/* 데모 캡처: 창 그림자까지 포함된 화면을 원본 비율로 표시 */
+.capture { display: block; width: 100%; height: auto; object-fit: contain; object-position: left top; min-height: 0; }
+.capture-caption { font-size: 24px; font-weight: 700; line-height: 1.35; }
+.capture-caption .key { display: block; margin-bottom: 4px; }
+
+/* 스크린샷: 굵은 테두리 안에 원본 비율로 표시 */
+.shot { border: var(--rule); display: block; width: 100%; height: auto; object-fit: contain; background: var(--ink); }
+
+/* ===========================================
+   TITLE SLIDE: 배송 라벨 원형
+   =========================================== */
+.title-label { grid-template-columns: 1fr 1fr 380px; grid-template-rows: 150px 1fr 170px; left: 150px; top: 110px; width: 1620px; height: 860px; }
+.title-label .cell { border-right: var(--rule); border-bottom: var(--rule); padding: 26px 36px; display: flex; flex-direction: column; gap: 12px; }
+.title-label .cell .value { font-size: 34px; }
+.title-label .last-col { border-right: none; }
+.title-label .last-row { border-bottom: none; }
+.title-label .main { grid-column: 1 / span 2; padding: 56px 36px 40px; justify-content: center; gap: 30px; }
+.title-label h1 { font-size: 100px; font-weight: 700; line-height: 1.14; letter-spacing: -0.03em; }
+.title-label .sub { font-size: 40px; font-weight: 500; }
+.title-label .sort-code { background: var(--ink); color: var(--label); justify-content: flex-end; padding: 36px; }
+.title-label .sort-code .key { color: #b9b7b0; }
+.title-label .sort-code .big { font: 700 120px/0.9 var(--font-mono); letter-spacing: -0.04em; }
+
+/* ===========================================
+   SECTION SLIDE: 구간이 바뀔 때 쓰는 라벨
+   왼쪽 잉크 칸에 구간 이름, 오른쪽에 이 구간에서 다룰 내용
+   =========================================== */
+.section-label { grid-template-columns: 820px 1fr; grid-template-rows: 1fr; }
+.section-label .name { background: var(--ink); color: var(--label); padding: 64px; display: flex; flex-direction: column; justify-content: flex-end; gap: 22px; }
+.section-label .name .key { color: #b9b7b0; font-size: 24px; }
+.section-label .name h2 { font-size: 84px; line-height: 1.15; letter-spacing: -0.03em; }
+.section-label .contents { display: flex; flex-direction: column; }
+.section-label .contents .cell { padding: 30px 48px; border-bottom: var(--rule); display: flex; flex-direction: column; gap: 8px; flex: 1; justify-content: center; }
+.section-label .contents .cell:last-child { border-bottom: none; }
+.section-label .contents .value { font-size: 32px; font-weight: 700; line-height: 1.35; }
+
+/* ===========================================
+   START SCREEN: 위에서 내려다본 택배 상자
+   열린 날개가 닫히고 테이프가 붙은 뒤 라벨이 붙습니다(포장).
+   발표 시작을 누르면 라벨이 떨어지고 테이프가 뜯기며 날개가 열립니다(개봉).
+   =========================================== */
+.s-start { background: var(--slide-bg); }
+.box { position: absolute; left: 50%; top: 50%; width: 1240px; height: 760px; transform: translate(-50%, -50%); perspective: 2600px; }
+.box-inside { position: absolute; inset: 0; background: #4a3420; border: 6px solid #6f4f2f; box-shadow: inset 0 24px 60px rgba(0, 0, 0, 0.45); }
+.flap { position: absolute; top: 0; width: 50%; height: 100%; background: #c99a66; border: 6px solid #7d5a36; transition: transform .7s cubic-bezier(0.22, 1, 0.36, 1); }
+.flap.left { left: 0; transform-origin: left center; }
+.flap.right { right: 0; transform-origin: right center; }
+.tape { position: absolute; background: rgba(228, 210, 168, 0.9); transition: transform .45s cubic-bezier(0.22, 1, 0.36, 1); }
+.tape.vertical { left: 50%; top: -28px; bottom: -28px; width: 170px; margin-left: -85px; transform-origin: top center; }
+.tape.horizontal { top: 50%; left: -28px; right: -28px; height: 170px; margin-top: -85px; transform-origin: left center; }
+.start-label { position: absolute; left: 50%; top: 50%; width: 880px; transform: translate(-50%, -50%); background: var(--label); border: 4px solid var(--ink); box-shadow: 0 10px 24px rgba(40, 26, 12, 0.3); display: grid; grid-template-columns: 1fr 1fr; transition: opacity .45s ease, transform .5s cubic-bezier(0.22, 1, 0.36, 1); }
+.start-label .cell { padding: 20px 28px; display: flex; flex-direction: column; gap: 6px; border-bottom: var(--rule); }
+.start-label .cell + .cell { border-left: var(--rule); }
+.start-label .cell .value { font-size: 26px; font-weight: 700; }
+.start-label .title { grid-column: 1 / span 2; padding: 36px 28px 30px; border-bottom: var(--rule); }
+.start-label .title h1 { font-size: 64px; font-weight: 700; line-height: 1.16; letter-spacing: -0.03em; }
+.start-label .title p { margin-top: 14px; font-size: 30px; font-weight: 500; color: var(--ink-soft); }
+.start-label .actions { grid-column: 1 / span 2; display: flex; align-items: center; justify-content: space-between; padding: 22px 28px; }
+.start-label .hint { font-size: 21px; color: var(--ink-faint); }
+.start-btn { display: inline-flex; align-items: center; gap: 14px; padding: 18px 34px; background: var(--ink); color: var(--label); border: none; font: 700 28px/1 var(--font-body); cursor: pointer; transition: background .2s ease; }
+.start-btn:hover { background: var(--red); }
+.start-btn svg { width: 22px; height: 22px; }
+
+/* 포장 전: 날개는 열려 있고, 테이프와 라벨은 없습니다 */
+.s-start.packing .flap.left { transform: rotateY(-100deg); }
+.s-start.packing .flap.right { transform: rotateY(100deg); }
+.s-start.packing .tape.vertical { transform: scaleY(0); }
+.s-start.packing .tape.horizontal { transform: scaleX(0); }
+.s-start.packing .start-label { opacity: 0; transform: translate(-50%, calc(-50% - 40px)) scale(1.04); }
+/* 포장 순서: 날개, 세로 테이프, 가로 테이프, 라벨 */
+.s-start.packed .tape.vertical { transition-delay: .75s; }
+.s-start.packed .tape.horizontal { transition-delay: 1.15s; }
+.s-start.packed .start-label { transition-delay: 1.6s; }
+/* 개봉 순서: 라벨, 가로 테이프, 세로 테이프, 날개 */
+.s-start.unboxing .start-label { opacity: 0; transform: translate(-50%, calc(-50% - 60px)) rotate(-4deg); transition-duration: .35s; }
+.s-start.unboxing .tape.horizontal { transform: scaleX(0); transform-origin: right center; transition-delay: .25s; transition-duration: .3s; }
+.s-start.unboxing .tape.vertical { transform: scaleY(0); transform-origin: bottom center; transition-delay: .5s; transition-duration: .3s; }
+.s-start.unboxing .flap.left { transform: rotateY(-100deg); transition-delay: .8s; }
+.s-start.unboxing .flap.right { transform: rotateY(100deg); transition-delay: .8s; }
+body.deck-start .deck-counter { visibility: hidden; }
+@media (prefers-reduced-motion: reduce) {
+    .s-start .flap, .s-start .tape, .s-start .start-label { transition: none !important; }
+}
+
+/* ===========================================
+   INLINE EDITING: E 키 또는 왼쪽 위 모서리로 켜고 끕니다.
+   =========================================== */
+.edit-hotzone { position: fixed; top: 0; left: 0; width: 80px; height: 80px; z-index: 10000; cursor: pointer; }
+.edit-toggle { position: fixed; top: 16px; left: 16px; z-index: 10001; width: 48px; height: 48px; border: 2px solid var(--ink); background: var(--label); color: var(--ink); display: flex; align-items: center; justify-content: center; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .3s ease; }
+.edit-toggle svg { width: 24px; height: 24px; }
+.edit-toggle.show, .edit-toggle.active { opacity: 1; pointer-events: auto; }
+.edit-toggle.active { background: var(--red); color: var(--label); border-color: var(--red); }
+body.editing [contenteditable="true"] { outline: 2px dashed rgba(200, 50, 30, 0.45); outline-offset: 4px; }
+.deck-counter { font: 500 14px/1 var(--font-mono); color: rgba(251, 251, 248, 0.55); }
+</style>
+</head>
+<body>
+<div class="edit-hotzone" aria-hidden="true"></div>
+<button class="edit-toggle" id="editToggle" type="button" title="편집 모드 (E)" aria-label="편집 모드 전환">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+</button>
+
+<div class="deck-viewport">
+<main class="deck-stage" id="deckStage">
+
+<!-- ============ 00. 시작 화면 ============ -->
+<section class="slide s-start packing" data-title="시작">
+    <div class="box" aria-hidden="true">
+        <div class="box-inside"></div>
+        <div class="flap left"></div>
+        <div class="flap right"></div>
+        <div class="tape vertical"></div>
+        <div class="tape horizontal"></div>
+    </div>
+    <div class="start-label">
+        <div class="cell"><span class="key">보내는 사람</span><span class="value">이호원 <span class="mono">(airtaxi)</span></span></div>
+        <div class="cell"><span class="key">받는 곳</span><span class="value">대한민국 .NET Conf 2026</span></div>
+        <div class="title">
+            <h1>.NET으로 만드는<br>MSIX 인스톨러 자동화</h1>
+            <p>샌드박스 배포를 더블클릭 한 번으로</p>
+        </div>
+        <div class="actions">
+            <span class="hint">누르면 전체 화면으로 시작합니다</span>
+            <button class="start-btn" id="startBtn" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l12-7.5z"/></svg>발표 시작</button>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 01. 제목 ============ -->
+<section class="slide" data-title="제목">
+    <div class="label title-label">
+        <div class="cell"><span class="key">보내는 사람</span><span class="value">이호원 <span class="mono">(airtaxi)</span></span></div>
+        <div class="cell"><span class="key">받는 곳</span><span class="value">대한민국 .NET Conf 2026</span></div>
+        <div class="cell last-col"><span class="key">설치 방법</span><span class="value">더블클릭 1회</span></div>
+        <div class="cell main">
+            <h1>.NET으로 만드는<br>MSIX 인스톨러 자동화</h1>
+            <p class="sub">샌드박스 배포를 더블클릭 한 번으로</p>
+        </div>
+        <div class="cell sort-code last-col"><span class="key">패키지 형식</span><span class="big">MSIX</span></div>
+        <div class="cell last-row"><span class="key">내용물</span><span class="value mono">Package.msixbundle</span></div>
+        <div class="cell last-row"><span class="key">아키텍처</span><span class="value mono">x64, arm64, x86</span></div>
+        <div class="cell last-row last-col"><span class="key">출력</span><span class="value mono">Installer.exe</span></div>
+    </div>
+</section>
+
+<!-- ============ 02. 발표자 ============ -->
+<section class="slide" data-title="발표자">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">시작하며</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>이호원 <span class="mono" style="font-weight:500">airtaxi</span></h2>
+            <p class="lede"><b>Windows</b>를 좋아해서 C#과 .NET을 시작했고,<br>지금은 WinUI와 Uno Platform으로 Windows 앱을 만듭니다.</p>
+            <div class="flow">
+                <div class="step"><span class="key">이전</span><span class="value">게임 개발자, 아크스타</span><p>인디 리듬게임 회사에서<br>게임 서버와 클라이언트 개발</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">학위</span><span class="value">컴퓨터공학 박사, 선문대학교</span><p>멀티모달 LLM과 RAG 기반<br>화재 대응 조언 시스템</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step ink"><span class="key">지금</span><span class="value">서울 현충원</span><p>박사 졸업 후 사회복무요원으로 복무 중<br>개발은 퇴근 후에 합니다</p></div>
+            </div>
+            <div class="fields cols-2 push">
+                <div class="cell no-bottom"><span class="key">공개한 오픈소스</span><span class="value">AT Installer, DeskBorder, LidGuard 등 Windows 앱 15개 이상</span></div>
+                <div class="cell no-bottom"><span class="key">GitHub</span><span class="value mono">github.com/airtaxi</span></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 03. 오늘 가져갈 것 ============ -->
+<section class="slide" data-title="오늘 가져갈 것">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">시작하며</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>이 발표에서 다루는 내용</h2>
+            <div class="fields cols-3 roomy" style="flex:1">
+                <div class="cell no-bottom"><span class="key">자동화</span><span class="value">MSIX 사이드로딩 자동화</span><p>권한 상승, 인증서 신뢰, 설치된 버전 비교, 배포 API 호출을 모두 코드로 처리합니다.</p></div>
+                <div class="cell no-bottom"><span class="key">.NET과 WinRT</span><span class="value">.NET에서 Windows 배포 API 호출</span><p><code>PackageManager</code>, <code>AsTask()</code>, <code>IProgress&lt;T&gt;</code>로 설치 진행률까지 연결합니다.</p></div>
+                <div class="cell no-bottom ink"><span class="key">확장</span><span class="value">GUI 도구를 CLI와 CI로 확장</span><p>공통 라이브러리, NativeAOT, RID별 도구 패키지로 빌드 파이프라인에 넣습니다.</p></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 04. 순서 ============ -->
+<section class="slide" data-title="순서">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">시작하며</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>오늘의 순서</h2>
+            <table class="tbl">
+                <thead><tr><th style="width:110px">순서</th><th style="width:560px">구간</th><th>다루는 내용</th></tr></thead>
+                <tbody>
+                    <tr><td class="num">1</td><td><b>왜 MSIX인가</b></td><td>자체 인스톨러의 한계, 가상화가 해결하는 것</td></tr>
+                    <tr><td class="num">2</td><td><b>사이드로딩의 벽</b></td><td>인증서 오류, 공인 인증서가 대안이 되기 어려운 이유</td></tr>
+                    <tr class="hot"><td class="num">3</td><td><b>데모: Tauri 앱 더블클릭 설치</b></td><td>설치부터 제거 후 흔적 비교까지</td></tr>
+                    <tr><td class="num">4</td><td><b>설치기 내부 구조</b></td><td>더블클릭 뒤에서 일어나는 일, .NET에서 WinRT 쓰기</td></tr>
+                    <tr><td class="num">5</td><td><b>생성기 내부 구조</b></td><td>아키텍처 감지, 매니페스트 읽기, 패키징, SFX 조립</td></tr>
+                    <tr class="hot"><td class="num">6</td><td><b>데모: .NET 앱 CLI 파이프라인</b></td><td><code>dotnet publish</code>부터 인스톨러까지</td></tr>
+                    <tr><td class="num">7</td><td><b>.NET 플랫폼 활용</b></td><td>코드 공유, NativeAOT, RID별 dotnet tool, CI</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 05. 구간 1 ============ -->
+<section class="slide" data-title="구간: 왜 MSIX인가">
+    <div class="label section-label">
+        <div class="name"><span class="key">구간 1</span><h2>왜 MSIX인가</h2></div>
+        <div class="contents">
+            <div class="cell"><span class="key">출발점</span><span class="value">직접 만든 <code class="mono">.atp</code> 인스톨러</span></div>
+            <div class="cell"><span class="key">한계</span><span class="value">앱이 실행 중에 남긴 흔적은 인스톨러가 모릅니다</span></div>
+            <div class="cell"><span class="key">전환</span><span class="value">운영체제가 설치와 제거를 관리하는 MSIX</span></div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 06. 타임라인 ============ -->
+<section class="slide" data-title="프로젝트 타임라인">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">왜 MSIX인가</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>AT Installer 개발 과정</h2>
+            <p class="lede" style="margin-top:-14px">2023년 12월부터 2026년 10월까지, 커밋 198개</p>
+            <table class="tbl">
+                <thead><tr><th style="width:250px">시기</th><th>변화</th></tr></thead>
+                <tbody>
+                    <tr><td class="num">2023-12</td><td>ZIP 기반 <code>.atp</code> 패키지와 자체 인스톨러, 7z SFX로 단일 EXE 생성</td></tr>
+                    <tr><td class="num">2025-12</td><td>.NET 10 전환, Installer와 Composer에 NativeAOT 적용</td></tr>
+                    <tr><td class="num">2026-04</td><td>명령줄 Composer 추가, 자동화용 <code>--minimal-log</code> 옵션</td></tr>
+                    <tr class="hot"><td class="num">2026-07-08</td><td><b>Installer가 <code>.msix</code>와 <code>.msixbundle</code>을 직접 설치</b>, 같은 날 MSIX 인스톨러 생성기 시작</td></tr>
+                    <tr><td class="num">2026-07-11</td><td>공통 라이브러리 분리, <code>aticmsixgen</code> CLI를 NuGet dotnet tool로 배포</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 07. 자체 인스톨러의 한계 ============ -->
+<section class="slide" data-title="자체 인스톨러의 한계">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">왜 MSIX인가</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>자체 인스톨러는 모든 것을 직접 관리해야 했습니다</h2>
+            <table class="tbl">
+                <thead><tr><th style="width:300px">관리 대상</th><th>직접 처리한 방법</th></tr></thead>
+                <tbody>
+                    <tr><td><b>설치 위치</b></td><td><code>%AppData%\{InstallationFolderName}</code>에 압축 해제</td></tr>
+                    <tr><td><b>제거 정보</b></td><td><code>HKCU\...\CurrentVersion\Uninstall</code>에 직접 등록</td></tr>
+                    <tr><td><b>설치한 파일 목록</b></td><td>제거할 때 지우려고 <code>InstalledFiles</code>를 매니페스트에 따로 기록</td></tr>
+                    <tr><td><b>스크립트</b></td><td>설치 후, 재설치 후, 제거 시 실행할 스크립트를 각각 지원</td></tr>
+                    <tr><td><b>제거 배치 파일</b></td><td>유니코드 문자가 깨지는 문제로 UTF-8 인코딩 지정</td></tr>
+                </tbody>
+            </table>
+            <div class="stamp push">그래도 앱이 실행 중에 AppData와 레지스트리에 남긴 흔적은 알 수 없습니다</div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 08. MSIX가 해결하는 것 ============ -->
+<section class="slide" data-title="MSIX가 해결하는 것">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">왜 MSIX인가</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>이 발표에서 말하는 샌드박스는 파일과 레지스트리 가상화입니다</h2>
+            <p class="lede" style="margin-top:-14px">앱의 권한을 제한하는 AppContainer 격리와는 다릅니다. 그래도 설치와 제거를 관리하는 데는 가상화만으로 충분합니다.</p>
+            <div class="fields cols-3">
+                <div class="cell"><span class="key">AppData 쓰기</span><span class="value">패키지 전용 위치로 리디렉션</span></div>
+                <div class="cell"><span class="key">HKCU 쓰기</span><span class="value">패키지 전용 레지스트리로 리디렉션</span></div>
+                <div class="cell ink"><span class="key">제거</span><span class="value">운영체제가 리디렉션된 데이터까지 함께 삭제</span></div>
+                <div class="cell no-bottom"><span class="key">설치 폴더</span><span class="value">읽기 전용으로 관리되어 앱이 덮어쓰지 못함</span></div>
+                <div class="cell no-bottom"><span class="key">배포 단위</span><span class="value"><code class="mono">.msixbundle</code> 하나에 x64, x86, ARM64</span></div>
+                <div class="cell no-bottom"><span class="key">대상 앱</span><span class="value">Electron, Tauri, WPF처럼 MSIX를 기본 제공하지 않는 앱도 포장</span></div>
+            </div>
+            <p class="note push">자체 인스톨러에서 <code>InstalledFiles</code>로 직접 추적하던 일을 이제 운영체제가 처리합니다.</p>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 09. 구간 2 ============ -->
+<section class="slide" data-title="구간: 사이드로딩의 벽">
+    <div class="label section-label">
+        <div class="name"><span class="key">구간 2</span><h2>사이드로딩의 벽</h2></div>
+        <div class="contents">
+            <div class="cell"><span class="key">시연</span><span class="value">.msixbundle을 더블클릭하면 생기는 일</span></div>
+            <div class="cell"><span class="key">원인</span><span class="value">이 PC가 게시자 인증서를 신뢰하지 않습니다</span></div>
+            <div class="cell"><span class="key">질문</span><span class="value">공인 인증서를 사면 되지 않을까요?</span></div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 10. 같은 오류 두 번 ============ -->
+<section class="slide" data-title="같은 오류 두 번">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">사이드로딩의 벽</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>앱 설치 관리자와 PowerShell 모두 같은 이유로 실패합니다</h2>
+            <div class="row" style="grid-template-columns:1fr 1.18fr;align-items:start">
+                <div class="stack" style="gap:14px">
+                    <span class="key">앱 설치 관리자에서 더블클릭, 설치 버튼 비활성화</span>
+                    <img class="shot" src="assets/error-app-installer.png" alt="앱 설치 관리자 창. 게시자 인증서를 확인할 수 없다는 오류와 함께 설치 버튼이 비활성화되어 있습니다.">
+                </div>
+                <div class="stack" style="gap:14px">
+                    <span class="key"><code>Add-AppxPackage .\DemoApp.msix</code></span>
+                    <img class="shot" src="assets/error-powershell.png" alt="PowerShell 창. 루트 인증서를 신뢰해야 한다는 오류 0x800B0109로 배포가 실패했습니다.">
+                </div>
+            </div>
+            <div class="stamp push">두 오류 모두 이 PC가 게시자 인증서를 신뢰하지 않아서 발생합니다 (<span class="mono">0x800B010A</span>, <span class="mono">0x800B0109</span>)</div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 11. 사용자가 거쳐야 하는 단계 ============ -->
+<section class="slide" data-title="사용자가 거쳐야 하는 단계">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">사이드로딩의 벽</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>설치하려면 사용자가 이 단계를 직접 거쳐야 합니다</h2>
+            <div class="flow tall">
+                <div class="step"><span class="key">1</span><span class="value">인증서 내보내기</span><p>패키지 속성의 디지털 서명 탭에서 인증서 확인</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">2</span><span class="value">인증서 신뢰 등록</span><p>로컬 컴퓨터의 신뢰할 수 있는 루트 인증 기관에 설치</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">3</span><span class="value">환경에 따라 개발자 모드</span><p>정책으로 사이드로딩이 막힌 환경</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">4</span><span class="value">설치 다시 시도</span><p>앱 설치 관리자나 PowerShell, 종속성 오류가 나면 직접 해결</p></div>
+            </div>
+            <div class="fields cols-2 push">
+                <div class="cell no-bottom"><span class="key">대상</span><span class="value">개발자가 아닌 일반 사용자</span></div>
+                <div class="cell no-bottom ink"><span class="key">질문</span><span class="value">이 과정을 고객에게 안내할 수 있을까요?</span></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 12. 공인 인증서 ============ -->
+<section class="slide" data-title="공인 인증서를 쓰기 어려운 이유">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">사이드로딩의 벽</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>공인 인증서를 사면 되지 않을까요?</h2>
+            <table class="tbl">
+                <thead><tr><th style="width:330px">항목</th><th>내용</th></tr></thead>
+                <tbody>
+                    <tr><td><b>비용</b></td><td>OV 코드 서명 인증서가 연 200달러대부터 시작하고, EV는 더 비쌉니다</td></tr>
+                    <tr><td><b>하드웨어</b></td><td>2023년 6월부터 개인 키를 USB 토큰이나 HSM에 보관해야 합니다. CI에서 쓰려면 클라우드 서명 서비스가 따로 필요합니다</td></tr>
+                    <tr><td><b>유효기간</b></td><td>2026년 3월부터 최대 460일로 줄어 거의 매년 재발급과 신원 확인을 거칩니다</td></tr>
+                    <tr class="hot"><td><b>Azure Artifact Signing</b></td><td>월 9.99달러로 저렴하지만 <b>개인 개발자는 미국과 캐나다에서만</b> 가입할 수 있고, 한국은 조직만 가입할 수 있습니다</td></tr>
+                </tbody>
+            </table>
+            <div class="row wide-left push" style="align-items:end">
+                <div class="stamp" style="align-self:auto">개인 개발자, 오픈소스, 사내 도구에는 자체 서명 인증서와 신뢰 등록 자동화가 현실적인 선택입니다</div>
+                <p class="note" style="text-align:right">2026년 10월 기준이며, 가격과 가입 조건은 자주 바뀝니다</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 13. 데모 1 ============ -->
+<section class="slide" data-title="데모 1">
+    <div class="label section-label">
+        <div class="name"><span class="key">구간 3, 라이브 데모</span><h2>Tauri 앱을<br>더블클릭으로 설치</h2></div>
+        <div class="contents">
+            <div class="cell"><span class="key">왜 Tauri인가</span><span class="value">기본 인스톨러가 MSI와 NSIS뿐이고, WebView2가 <code class="mono">%LOCALAPPDATA%</code>에 데이터를 남깁니다</span></div>
+            <div class="cell"><span class="key">볼 장면</span><span class="value"><code class="mono">Installer-x64.exe</code> 더블클릭, UAC, 설치 완료</span></div>
+            <div class="cell"><span class="key">확인할 것</span><span class="value">앱 데이터가 어디에 생기고, 제거하면 어떻게 되는지</span></div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 데모 1-1. NSIS로 설치했다 지우면 ============ -->
+<section class="slide" data-title="데모: NSIS 제거 후">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">데모: Tauri 앱 더블클릭 설치</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>기본 NSIS 인스톨러로 설치한 뒤 제거해 보겠습니다</h2>
+            <div class="row" style="grid-template-columns:0.8fr 1.4fr;align-items:start">
+                <div class="stack" style="gap:14px">
+                    <div class="capture-caption"><span class="key">실행</span>앱을 실행하면 WebView2 데이터 폴더가 생깁니다</div>
+                    <img class="capture" src="assets/demo1-tauri-app.png" alt="Tauri Demo 앱 창. Welcome to Tauri 화면이 표시되어 있습니다." style="max-height:470px;border:var(--rule)">
+                </div>
+                <div class="stack" style="gap:14px">
+                    <div class="capture-caption"><span class="key">제거 후</span>앱 폴더는 사라졌지만 데이터 폴더는 남았습니다</div>
+                    <img class="capture" src="assets/demo1-nsis-leftover.png" alt="PowerShell 창. 제거 후 앱 설치 폴더는 없지만 com.demo.tauridemo 폴더에 EBWebView가 남아 있습니다." style="border:var(--rule)">
+                </div>
+            </div>
+            <div class="stamp push">기본 설정으로 제거하면 <span class="mono">%LOCALAPPDATA%\com.demo.tauridemo</span>가 그대로 남습니다</div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 데모 1-2. AT Installer 설치 과정 ============ -->
+<section class="slide" data-title="데모: AT Installer 설치">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">데모: Tauri 앱 더블클릭 설치</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>같은 앱을 MSIX로 패키징하고 <span class="mono">Installer-arm64.exe</span>로 설치합니다</h2>
+            <div class="row" style="grid-template-columns:1.8fr 1fr;gap:36px;align-items:start">
+                <div class="stack" style="gap:10px">
+                    <div class="capture-caption">1. 설치 화면</div>
+                    <img class="capture" src="assets/demo1-installer-ready.png" alt="AT Installer 설치 화면. Tauri Demo, Publisher: Demo Publisher, Tauri 아이콘과 Install 버튼이 보입니다." style="border:var(--rule)">
+                    <p class="lede" style="margin-top:10px">이름, 게시자, 아이콘은 패키지 매니페스트에서 읽어 옵니다. <b>인증서 등록, 개발자 모드 설정, PowerShell 실행</b>은 사용자가 할 필요가 없습니다.</p>
+                </div>
+                <div class="stack" style="gap:18px">
+                    <div class="stack" style="gap:10px">
+                        <div class="capture-caption">2. UAC 승인 후 설치 진행</div>
+                        <img class="capture" src="assets/demo1-installer-progress.png" alt="AT Installer 설치 진행 화면. 진행률 55%가 표시되어 있습니다." style="border:var(--rule)">
+                    </div>
+                    <div class="stack" style="gap:10px">
+                        <div class="capture-caption">3. 설치 완료, 몇 초 뒤 자동 종료</div>
+                        <img class="capture" src="assets/demo1-installer-complete.png" alt="AT Installer 설치 완료 화면. Completed! 문구가 표시되어 있습니다." style="border:var(--rule)">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 데모 1-3. 시작 메뉴와 데이터 위치 ============ -->
+<section class="slide" data-title="데모: 데이터 리디렉션">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">데모: Tauri 앱 더블클릭 설치</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>설치된 앱은 시작 메뉴에 등록되고, 데이터는 패키지 전용 위치에 저장됩니다</h2>
+            <div class="row" style="grid-template-columns:0.62fr 1.4fr;align-items:start">
+                <div class="stack" style="gap:14px">
+                    <div class="capture-caption"><span class="key">시작 메뉴</span>일반 앱처럼 검색되고 실행됩니다</div>
+                    <img class="capture" src="assets/demo1-start-menu.png" alt="Windows 시작 메뉴에서 tauri를 검색한 화면. Tauri Demo 앱이 최상위 결과로 표시되어 있습니다." style="max-height:560px">
+                </div>
+                <div class="stack" style="gap:14px">
+                    <div class="capture-caption"><span class="key">한 번 실행하고 닫은 뒤</span>원래 경로에는 폴더가 생기지 않았습니다</div>
+                    <img class="capture" src="assets/demo1-msix-redirect.png" alt="PowerShell 창. %LOCALAPPDATA%\com.demo.tauridemo는 False이고, 데이터는 Packages 아래 LocalCache\Local\com.demo.tauridemo에 있습니다." style="border:var(--rule)">
+                    <p class="lede" style="margin-top:12px">앱은 <code>%LOCALAPPDATA%\com.demo.tauridemo</code>에 쓰지만, 실제 파일은 <code>Packages\TauriDemo_…\LocalCache\Local</code> 아래에 저장됩니다.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 데모 1-4. 제거 ============ -->
+<section class="slide" data-title="데모: MSIX 제거">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">데모: Tauri 앱 더블클릭 설치</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>앱을 제거하면 데이터도 함께 삭제됩니다</h2>
+            <div class="row" style="grid-template-columns:0.62fr 1.4fr;align-items:start">
+                <div class="stack" style="gap:14px">
+                    <div class="capture-caption"><span class="key">제거</span>시작 메뉴에서 바로 제거</div>
+                    <img class="capture" src="assets/demo1-uninstall.png" alt="시작 메뉴의 Tauri Demo 제거 확인 대화 상자. This app and its related info will be removed 문구가 보입니다." style="max-height:560px">
+                </div>
+                <div class="stack" style="gap:14px">
+                    <div class="capture-caption"><span class="key">제거 후</span>패키지 폴더가 삭제되었습니다</div>
+                    <img class="capture" src="assets/demo1-after-uninstall.png" alt="PowerShell 창. Packages\TauriDemo_* 경로를 확인한 결과가 False입니다." style="max-width:760px">
+                    <div class="stamp" style="margin-top:12px">NSIS와 달리 남은 데이터 폴더가 없습니다</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 14. NSIS와 MSIX 비교 ============ -->
+<section class="slide" data-title="NSIS와 MSIX의 흔적 비교">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">데모: Tauri 앱 더블클릭 설치</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>NSIS와 MSIX의 제거 결과 비교</h2>
+            <table class="tbl">
+                <thead><tr><th style="width:280px"></th><th>NSIS 인스톨러</th><th>MSIX와 AT Installer</th></tr></thead>
+                <tbody>
+                    <tr><td><b>설치</b></td><td>인스톨러 실행</td><td><code>Installer-x64.exe</code> 더블클릭</td></tr>
+                    <tr><td><b>WebView2 데이터</b></td><td><code>%LOCALAPPDATA%\&lt;앱 식별자&gt;</code></td><td><code>%LOCALAPPDATA%\Packages\TauriDemo_…\LocalCache\Local\com.demo.tauridemo</code></td></tr>
+                    <tr class="hot"><td><b>제거 후</b></td><td>데이터 폴더가 그대로 남음</td><td><b>패키지 폴더까지 삭제됨</b></td></tr>
+                </tbody>
+            </table>
+            <p class="lede push">두 경우 모두 앱 코드는 같습니다. MSIX로 설치하면 운영체제가 쓰기 경로를 패키지 전용 위치로 리디렉션합니다.</p>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 15. 구간 4 ============ -->
+<section class="slide" data-title="구간: 설치기 내부 구조">
+    <div class="label section-label">
+        <div class="name"><span class="key">구간 4</span><h2>설치기<br>내부 구조</h2></div>
+        <div class="contents">
+            <div class="cell"><span class="key">주제</span><span class="value">설치기가 더블클릭 이후 처리하는 일</span></div>
+            <div class="cell"><span class="key">핵심</span><span class="value">권한, 인증서, 개발자 모드, 버전 비교, 배포</span></div>
+            <div class="cell"><span class="key">.NET 관점</span><span class="value">WinRT <code class="mono">PackageManager</code>를 일반 클래스처럼 호출</span></div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 16. 전체 흐름 ============ -->
+<section class="slide" data-title="설치 전체 흐름">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>더블클릭부터 설치 완료까지</h2>
+            <div class="flow tall">
+                <div class="step ink"><span class="key">SFX</span><span class="value mono" style="font-size:22px">Installer-x64.exe</span><p>임시 폴더에 압축 해제 후 설치기 실행</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">분기</span><span class="value">확장자 확인</span><p><code>.msix</code>면 MSIX 전용 창</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">1</span><span class="value">권한 상승</span><p>관리자로 다시 실행</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">2</span><span class="value">인증서 등록</span><p>서명에서 꺼내 신뢰 저장소에 추가</p></div>
+            </div>
+            <div class="flow tall">
+                <div class="step"><span class="key">3</span><span class="value">개발자 모드</span><p>원래 값을 백업하고 활성화</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">4</span><span class="value">버전 비교</span><p>설치, 업데이트, 재설치, 차단</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">5</span><span class="value">배포</span><p><code>AddPackageAsync</code>와 진행률 표시</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step ink"><span class="key">finally</span><span class="value">개발자 모드 복원</span><p>설치 결과와 관계없이 원래 값으로 복원</p></div>
+            </div>
+            <p class="note push">설치 화면의 앱 이름, 아이콘, 버전은 패키지 안의 매니페스트에서 읽어 옵니다.</p>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 17. 7z SFX ============ -->
+<section class="slide" data-title="7z SFX 구조">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>EXE 인스톨러는 SFX 모듈, 설정, 압축 파일을 이어 붙여 만듭니다</h2>
+<pre class="code"><span class="cm">rem SFX 모듈 + 실행 설정 + 압축 파일 = 단일 EXE</span>
+copy /b 7zS.sfx + config_x64.txt + Archive.7z Installer-x64.exe</pre>
+            <div class="row half">
+                <div class="stack">
+                    <div class="code-caption"><span class="mono">config_msixbundle.txt</span></div>
+<pre class="code"><span class="cm">;!@Install@!UTF-8!</span>
+RunProgram=<span class="st">"Installer.exe Package.msixbundle"</span>
+<span class="cm">;!@InstallEnd@!</span></pre>
+                    <p class="note">silent 설정은 실행 인자 뒤에 <code>/silent</code>를 붙입니다.</p>
+                </div>
+                <div class="stack">
+                    <div class="code-caption"><span class="mono">App.xaml.cs</span></div>
+<pre class="code"><span class="cm">// SFX가 작업 디렉터리를 바꾸므로 절대 경로로 고정</span>
+<span class="kw">var</span> packageFilePath = Path.GetFullPath(args[1]);</pre>
+                    <p class="note">상대 경로로 받으면 패키지를 찾지 못하는 문제가 있었습니다.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 18. 확장자 분기 ============ -->
+<section class="slide" data-title="확장자로 창 분기">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>설치기는 패키지 확장자에 따라 처리 흐름을 나눕니다</h2>
+            <div class="code-caption"><span class="mono">Installer/App.xaml.cs</span></div>
+<pre class="code"><span class="kw">var</span> isSilent = args.Contains(<span class="st">"/silent"</span>, StringComparer.OrdinalIgnoreCase);
+<span class="kw">var</span> shouldAutoInstall = args.Contains(<span class="st">"/install"</span>, StringComparer.OrdinalIgnoreCase);
+
+<span class="cm">// Dispatch to the appropriate window based on package file extension</span>
+<span class="kw">var</span> extension = Path.GetExtension(packageFilePath).ToLowerInvariant();
+<span class="hl"><span class="kw">if</span> (extension == <span class="st">".msix"</span> || extension == <span class="st">".msixbundle"</span>)</span>
+<span class="hl">    _window = <span class="kw">new</span> MsixInstallerWindow(packageFilePath, isSilent, shouldAutoInstall);</span>
+<span class="kw">else</span> _window = <span class="kw">new</span> InstallerWindow(packageFilePath, isSilent, shouldAutoInstall);</pre>
+            <div class="fields cols-2 push">
+                <div class="cell no-bottom"><span class="key"><code class="mono">.atp</code></span><span class="value">기존 자체 설치 흐름</span><p>압축 해제, 레지스트리 등록, 바로 가기 생성</p></div>
+                <div class="cell no-bottom ink"><span class="key"><code class="mono">.msix</code>, <code class="mono">.msixbundle</code></span><span class="value">MSIX 사이드로딩 흐름</span><p>권한, 인증서, 개발자 모드, 배포 API</p></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 19. 권한 상승 ============ -->
+<section class="slide" data-title="1단계 권한 상승">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>1단계: 관리자 권한으로 자신을 다시 실행합니다</h2>
+            <div class="code-caption"><span class="mono">Installer/Helper/AdministratorHelper.cs</span></div>
+<pre class="code small" style="font-size:20px;line-height:1.42"><span class="kw">public static bool</span> IsRunningAsAdministrator()
+{
+    <span class="kw">using var</span> identity = WindowsIdentity.GetCurrent();
+    <span class="kw">return new</span> WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+}
+
+<span class="kw">public static void</span> RelaunchElevatedPreservingArguments()
+{
+    <span class="kw">var</span> arguments = <span class="kw">string</span>.Join(<span class="st">' '</span>, Environment.GetCommandLineArgs().Skip(1)
+        .Select(arg =&gt; arg.Contains(<span class="st">' '</span>) ? <span class="st">$"\"{arg}\""</span> : arg));
+<span class="hl">    <span class="kw">if</span> (!arguments.Contains(<span class="st">"/install"</span>, StringComparison.Ordinal)) arguments += <span class="st">" /install"</span>;</span>
+
+<span class="hl">    <span class="kw">try</span> { Process.Start(<span class="kw">new</span> ProcessStartInfo { FileName = Environment.ProcessPath, Arguments = arguments,</span>
+<span class="hl">                                           Verb = <span class="st">"runas"</span>, UseShellExecute = <span class="kw">true</span> }); }</span>
+    <span class="kw">catch</span> { }
+    Environment.Exit(0);
+}</pre>
+            <p class="lede push"><code>/install</code> 인자가 있으면 다시 실행된 설치기가 사용자 입력 없이 설치를 진행합니다.</p>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 20. 인증서 ============ -->
+<section class="slide" data-title="2단계 인증서 등록">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>2단계: 패키지 서명에서 인증서를 꺼내 신뢰 저장소에 등록합니다</h2>
+            <div class="code-caption"><span class="mono">Installer/Msix/MsixCertificateHelper.cs</span></div>
+<pre class="code"><span class="kw">#pragma warning disable</span> SYSLIB0057
+<span class="hl"><span class="kw">var</span> signerCertificate = <span class="kw">new</span> X509Certificate2(X509Certificate.CreateFromSignedFile(packageFilePath));</span>
+<span class="kw">#pragma warning restore</span> SYSLIB0057
+
+<span class="kw">using var</span> store = <span class="kw">new</span> X509Store(StoreName.Root, StoreLocation.LocalMachine);
+store.Open(OpenFlags.ReadWrite);
+<span class="kw">var</span> existing = store.Certificates.Find(X509FindType.FindByThumbprint, signerCertificate.Thumbprint, <span class="kw">false</span>);
+<span class="kw">if</span> (existing.Count == 0) store.Add(signerCertificate);</pre>
+            <div class="fields cols-2 push">
+                <div class="cell no-bottom"><span class="key">별도 인증서 파일</span><span class="value">필요 없습니다</span><p>서명된 패키지 자체에서 서명자 인증서를 읽습니다.</p></div>
+                <div class="cell no-bottom"><span class="key"><code class="mono">SYSLIB0057</code></span><span class="value">.NET 9부터 경고</span><p>서명된 파일에서 인증서를 꺼내는 대체 API가 <code>X509CertificateLoader</code>에 없어서 경고를 억제했습니다.</p></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 21. 개발자 모드 ============ -->
+<section class="slide" data-title="3단계 개발자 모드">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>3단계: 개발자 모드를 켜고, 설치가 끝나면 원래 값으로 되돌립니다</h2>
+            <div class="fields cols-3">
+                <div class="cell no-bottom"><span class="key">레지스트리 키</span><span class="value mono" style="font-size:21px;word-break:break-all">HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock</span></div>
+                <div class="cell no-bottom"><span class="key">값</span><span class="value mono" style="font-size:21px">AllowDevelopmentWithoutDevLicense</span></div>
+                <div class="cell no-bottom"><span class="key">참고</span><span class="value" style="font-size:23px">Windows 10 2004부터는 신뢰된 서명이 있으면 개발자 모드 없이도 사이드로딩이 허용됩니다</span></div>
+            </div>
+            <div class="code-caption"><span class="mono">Installer/MsixInstallerWindow.xaml.cs</span></div>
+<pre class="code small"><span class="kw">int</span>? originalDeveloperModeState = <span class="kw">null</span>;
+<span class="kw">try</span>
+{
+    originalDeveloperModeState = DeveloperModeHelper.BackupDeveloperModeState();
+    <span class="kw">bool</span> developerModeEnabled = DeveloperModeHelper.TryEnableDeveloperMode();
+    <span class="cm">// 버전 비교, 배포 ...</span>
+}
+<span class="kw">finally</span>
+{
+<span class="hl">    <span class="kw">if</span> (originalDeveloperModeState.HasValue)</span>
+<span class="hl">        DeveloperModeHelper.TryRestoreDeveloperModeState(originalDeveloperModeState.Value);</span>
+}</pre>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 22. 버전 비교 ============ -->
+<section class="slide" data-title="4단계 버전 비교">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>4단계: 이미 설치된 버전과 비교합니다</h2>
+            <div class="code-caption"><span class="mono">Installer/Msix/MsixDeploymentHelper.cs</span></div>
+<pre class="code small"><span class="kw">var</span> packageManager = <span class="kw">new</span> PackageManager();
+<span class="hl"><span class="kw">foreach</span> (<span class="kw">var</span> package <span class="kw">in</span> packageManager.FindPackagesForUser(<span class="kw">string</span>.Empty))</span>
+{
+    <span class="kw">if</span> (package.Id.Name != metadata.Name) <span class="kw">continue</span>;
+    <span class="cm">// package.Id.Version을 System.Version으로 바꿔 패키지 버전과 비교</span>
+}</pre>
+            <table class="tbl">
+                <thead><tr><th style="width:420px">설치된 버전</th><th style="width:380px">버튼</th><th>동작</th></tr></thead>
+                <tbody>
+                    <tr><td>없음</td><td>설치</td><td>바로 배포</td></tr>
+                    <tr><td>패키지보다 낮음</td><td>업데이트</td><td>그대로 배포하면 운영체제가 업데이트로 처리</td></tr>
+                    <tr><td>패키지와 같음</td><td>재설치</td><td>확인을 받은 뒤 <code>RemovePackageAsync</code> 후 배포</td></tr>
+                    <tr class="hot"><td>패키지보다 높음</td><td>다운그레이드 불가</td><td>버튼 비활성화, silent 모드면 종료 코드 24</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 23. AddPackageAsync ============ -->
+<section class="slide" data-title="5단계 배포">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>5단계: <span class="mono">AddPackageAsync</span>로 패키지를 배포합니다</h2>
+            <div class="code-caption"><span class="mono">Installer/Msix/MsixDeploymentHelper.cs</span></div>
+<pre class="code small" style="font-size:20px;line-height:1.4"><span class="kw">public static async</span> Task&lt;MsixDeploymentResult&gt; AddPackageAsync(<span class="kw">string</span> packageFilePath, IProgress&lt;DeploymentProgress&gt; progress)
+{
+    <span class="kw">var</span> packageManager = <span class="kw">new</span> PackageManager();
+    <span class="kw">var</span> packageUri = <span class="kw">new</span> Uri(packageFilePath);
+<span class="hl">    <span class="kw">var</span> deploymentOperation = packageManager.AddPackageAsync(packageUri, <span class="kw">null</span>, DeploymentOptions.ForceApplicationShutdown);</span>
+
+<span class="hl">    <span class="kw">try</span> { <span class="kw">await</span> deploymentOperation.AsTask(progress); }</span>
+    <span class="kw">catch</span> (Exception exception)
+    {
+        <span class="kw">return new</span> MsixDeploymentResult { IsSuccessful = <span class="kw">false</span>, ErrorText = exception.Message, ... };
+    }
+
+    <span class="cm">// 완료 상태와 오류 코드를 MsixDeploymentResult로 정리해 반환</span>
+}</pre>
+            <div class="fields cols-2 push">
+                <div class="cell no-bottom"><span class="key"><code class="mono">ForceApplicationShutdown</code></span><span class="value">실행 중인 이전 버전을 종료하고 업데이트</span></div>
+                <div class="cell no-bottom"><span class="key"><code class="mono">AsTask(progress)</code></span><span class="value">WinRT 진행률을 <code class="mono">IProgress&lt;T&gt;</code>로 받아 진행률 막대에 연결</span></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 24. .NET에서 WinRT 쓰기 ============ -->
+<section class="slide" data-title=".NET에서 WinRT API 쓰기">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>콘솔 앱이나 WPF 앱에서도 <span class="mono">PackageManager</span>를 호출할 수 있습니다</h2>
+            <div class="row half">
+                <div class="stack">
+                    <div class="code-caption"><span class="mono">*.csproj</span></div>
+<pre class="code" style="font-size:18px">&lt;<span class="kw">TargetFramework</span>&gt;net10.0-windows10.0.26100.0&lt;/<span class="kw">TargetFramework</span>&gt;</pre>
+                    <ul class="list">
+                        <li>대상 프레임워크에 <b>Windows SDK 버전</b>을 적으면 C#/WinRT 프로젝션이 함께 참조됩니다.</li>
+                        <li><code>PackageManager</code>, <code>X509Store</code>, <code>Registry</code>를 같은 C# 코드 안에서 섞어 씁니다.</li>
+                        <li><code>ApplicationData.Current</code>처럼 패키지 ID가 필요한 API는 예외입니다.</li>
+                    </ul>
+                </div>
+                <div class="stack">
+                    <div class="fields cols-2" style="grid-template-columns:1fr">
+                        <div class="cell"><span class="key">비동기</span><span class="value"><code class="mono">IAsyncOperationWithProgress</code>는 <code class="mono">AsTask()</code>로 <code class="mono">await</code></span></div>
+                        <div class="cell"><span class="key">진행률</span><span class="value"><code class="mono">AsTask(IProgress&lt;T&gt;)</code>로 그대로 연결</span></div>
+                        <div class="cell no-bottom ink"><span class="key">패키지 ID 없이</span><span class="value">이 설치기도 패키징되지 않은 일반 실행 파일입니다. 패키지 ID 없이도 다른 MSIX를 설치할 수 있습니다</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 25. silent 종료 코드 ============ -->
+<section class="slide" data-title="silent 모드와 종료 코드">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">설치기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>silent 모드에서는 설치 결과를 종료 코드로 반환합니다</h2>
+            <div class="row wide-right" style="flex:1">
+                <div class="stack">
+                    <p class="lede">사내 배포 도구나 스크립트가 설치 결과를 판단할 수 있도록 실패 지점마다 다른 종료 코드를 돌려줍니다.</p>
+                    <div class="code-caption"><span class="mono">config_msix_silent.txt</span></div>
+<pre class="code small">RunProgram=<span class="st">"Installer.exe Package.msix /silent"</span></pre>
+                </div>
+                <table class="tbl">
+                    <thead><tr><th style="width:150px">코드</th><th>의미</th></tr></thead>
+                    <tbody>
+                        <tr><td class="num">0</td><td>설치 성공</td></tr>
+                        <tr><td class="num">24</td><td>더 높은 버전이 설치되어 있어 다운그레이드 불가</td></tr>
+                        <tr><td class="num">27</td><td>개발자 모드 활성화 실패</td></tr>
+                        <tr><td class="num">28</td><td>패키지 배포 실패</td></tr>
+                        <tr><td class="num">29</td><td>인증서 추출 또는 등록 실패</td></tr>
+                        <tr><td class="num">30</td><td>같은 버전이 이미 설치됨</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 26. 구간 5 ============ -->
+<section class="slide" data-title="구간: 생성기 내부 구조">
+    <div class="label section-label">
+        <div class="name"><span class="key">구간 5</span><h2>생성기<br>내부 구조</h2></div>
+        <div class="contents">
+            <div class="cell"><span class="key">입력</span><span class="value">빌드 출력 폴더, 또는 이미 만든 MSIX</span></div>
+            <div class="cell"><span class="key">자동화</span><span class="value">아키텍처 감지, 매니페스트 읽기, 패키징, SFX 조립</span></div>
+            <div class="cell"><span class="key">출력</span><span class="value">아키텍처별 <code class="mono">Installer-*.exe</code>, 여러 개면 ZIP</span></div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 생성기 1. 두 가지 길 ============ -->
+<section class="slide" data-title="MSIX 인스톨러 생성기">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>MSIX 인스톨러 생성기의 두 가지 사용 방법</h2>
+            <div class="flow tall">
+                <div class="step"><span class="key">입력</span><span class="value">빌드 출력 폴더</span><p>Electron, Tauri, WPF 등 프레임워크와 관계없음</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">MSIX 패키징 탭</span><span class="value">인증서, 매니페스트, 패키징</span><p>세 단계를 거쳐 <code>.msix</code> 또는 <code>.msixbundle</code></p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">EXE 패키징 탭</span><span class="value">더블클릭 인스톨러 조립</span><p>이미 만든 MSIX도 바로 넣을 수 있습니다</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step ink"><span class="key">출력</span><span class="value mono" style="font-size:24px">Installer-*.exe</span><p>아키텍처가 여러 개면 ZIP으로 묶음</p></div>
+            </div>
+            <div class="fields cols-3 push">
+                <div class="cell no-bottom"><span class="key">MSIX를 이미 만드는 프로젝트</span><span class="value" style="font-size:26px">EXE 패키징 탭만 쓰면 됩니다</span></div>
+                <div class="cell no-bottom"><span class="key">MSIX를 지원하지 않는 프레임워크</span><span class="value" style="font-size:26px">MSIX 패키징 탭부터 시작합니다</span></div>
+                <div class="cell no-bottom ink"><span class="key">내부 구현</span><span class="value" style="font-size:26px">앞에서 본 CLI와 같은 공통 라이브러리를 씁니다</span></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 생성기 2. 인증서 ============ -->
+<section class="slide" data-title="생성기: 인증서">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>MSIX 패키징 1단계: 인증서 생성</h2>
+            <div class="row" style="grid-template-columns:1.45fr 1fr;align-items:start">
+                <img class="capture" src="assets/generator-certificate.png" alt="MSIX 패키징 탭의 인증서 화면. 게시자, 유효 기간(기본 1825일), 비밀번호 입력란과 생성 버튼이 있습니다." style="border:var(--rule)">
+                <div class="fields cols-2" style="grid-template-columns:1fr">
+                    <div class="cell"><span class="key">게시자</span><span class="value" style="font-size:25px">이름만 입력하면 <span class="mono">CN=이름</span> 형식으로 변환</span></div>
+                    <div class="cell"><span class="key">유효 기간</span><span class="value" style="font-size:25px">기본 1825일(5년)</span></div>
+                    <div class="cell"><span class="key">비밀번호</span><span class="value" style="font-size:25px">비워 두면 기본값 <span class="mono">password</span></span></div>
+                    <div class="cell no-bottom ink"><span class="key">재사용하는 이유</span><span class="value" style="font-size:25px">같은 인증서로 계속 서명해야 사용자가 버전마다 새 인증서를 신뢰하지 않아도 됩니다</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 생성기 3. 매니페스트 ============ -->
+<section class="slide" data-title="생성기: 매니페스트">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>2단계: 매니페스트 작성</h2>
+            <div class="row" style="grid-template-columns:1.45fr 1fr;align-items:start">
+                <img class="capture" src="assets/generator-manifest.png" alt="MSIX 패키징 탭의 매니페스트 화면. 표시 이름, 애플리케이션 설명, 실행 파일 이름, 로고 이미지 파일 입력란이 있습니다." style="border:var(--rule)">
+                <div class="fields cols-2" style="grid-template-columns:1fr">
+                    <div class="cell"><span class="key">표시 이름, 설명</span><span class="value" style="font-size:25px">시작 메뉴와 설정 앱에 보이는 정보</span></div>
+                    <div class="cell"><span class="key">실행 파일 이름</span><span class="value" style="font-size:25px">폴더마다 이 파일을 찾아 아키텍처를 감지합니다</span></div>
+                    <div class="cell"><span class="key">로고</span><span class="value" style="font-size:25px">선택 사항, 설치 화면과 시작 메뉴 아이콘</span></div>
+                    <div class="cell no-bottom ink"><span class="key"><span class="mono">.aticmsixconfig</span></span><span class="value" style="font-size:25px">버전과 인증서를 뺀 정보만 담아 릴리스마다 재사용합니다</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 생성기 4. 패키징 ============ -->
+<section class="slide" data-title="생성기: 패키징">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>3단계: 버전과 빌드 출력을 지정해 패키징</h2>
+            <div class="row" style="grid-template-columns:1.45fr 1fr;align-items:start">
+                <img class="capture" src="assets/generator-packaging.png" alt="MSIX 패키징 탭의 패키징 화면. 매니페스트 파일, 인증서 파일, Major, Minor, Build, Revision으로 나뉜 버전 입력란이 있습니다." style="border:var(--rule)">
+                <div class="fields cols-2" style="grid-template-columns:1fr">
+                    <div class="cell"><span class="key">매니페스트</span><span class="value" style="font-size:25px">2단계에서 저장한 파일을 불러옵니다</span></div>
+                    <div class="cell"><span class="key">인증서</span><span class="value" style="font-size:25px">1단계의 PFX, 비우면 이번만 쓸 임시 인증서</span></div>
+                    <div class="cell"><span class="key">버전</span><span class="value" style="font-size:25px">실행 파일의 파일 버전으로 자동으로 채웁니다</span></div>
+                    <div class="cell no-bottom ink"><span class="key">출력 폴더</span><span class="value" style="font-size:25px">아키텍처별 빌드 폴더를 추가하면 하나면 <span class="mono">.msix</span>, 여럿이면 <span class="mono">.msixbundle</span></span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 생성기 5. EXE 패키징 ============ -->
+<section class="slide" data-title="생성기: EXE 패키징">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>EXE 패키징 탭은 MSIX의 패키지 정보를 읽어 표시합니다</h2>
+            <div class="row" style="grid-template-columns:1.45fr 1fr;align-items:start">
+                <img class="capture" src="assets/generator-exe-packaging.png" alt="EXE 패키징 화면. TauriDemo.msixbundle을 불러오자 이름, 표시 이름, 버전, 게시자, 감지된 아키텍처 ARM64와 x64가 표시되고 x64와 ARM64가 선택되어 있습니다." style="border:var(--rule)">
+                <div class="fields cols-2" style="grid-template-columns:1fr">
+                    <div class="cell"><span class="key">패키지 정보</span><span class="value" style="font-size:25px">이름, 표시 이름, 버전, 게시자를 매니페스트에서 읽습니다</span></div>
+                    <div class="cell"><span class="key">아키텍처</span><span class="value" style="font-size:25px">번들에 든 아키텍처만 고를 수 있습니다. 이 번들에는 x86이 없습니다</span></div>
+                    <div class="cell no-bottom ink"><span class="key">생성</span><span class="value" style="font-size:25px">하나를 고르면 EXE, 둘 이상이면 아키텍처별 EXE를 담은 ZIP</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 생성기 6. 설정과 배포 ============ -->
+<section class="slide" data-title="생성기: 설정과 배포">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>생성기 자체도 MSIX로 만들어 Microsoft Store에서 배포합니다</h2>
+            <div class="row" style="grid-template-columns:1fr 1.1fr;align-items:start">
+                <img class="capture" src="assets/generator-settings.png" alt="생성기 설정 화면. 언어, 테마, 업데이트 확인, 자동 업데이트 확인, 버전 v1.1.5.0, GitHub 리포지토리, 제작자 항목이 있습니다." style="border:var(--rule);max-height:640px;width:auto;max-width:100%">
+                <div class="fields cols-2" style="grid-template-columns:1fr">
+                    <div class="cell"><span class="key">언어</span><span class="value" style="font-size:25px">영어, 한국어, 일본어, 중국어 간체와 번체</span></div>
+                    <div class="cell"><span class="key">테마</span><span class="value" style="font-size:25px">시스템 기본, 밝게, 어둡게</span></div>
+                    <div class="cell"><span class="key">업데이트</span><span class="value" style="font-size:25px">Microsoft Store 업데이트를 주기적으로 확인하고 알림</span></div>
+                    <div class="cell no-bottom ink"><span class="key">받는 곳</span><span class="value" style="font-size:25px">Microsoft Store에서 무료, 소스는 GitHub에 공개</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 28. PE 헤더 ============ -->
+<section class="slide" data-title="PE 헤더로 아키텍처 감지">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>실행 파일의 PE 헤더로 아키텍처를 판별합니다</h2>
+            <div class="row wide-right" style="flex:1">
+                <div class="stack">
+                    <table class="tbl">
+                        <thead><tr><th style="width:190px">위치</th><th>읽는 값</th></tr></thead>
+                        <tbody>
+                            <tr><td class="num">0x00</td><td><code>MZ</code> 서명 (<code>0x5A4D</code>)</td></tr>
+                            <tr><td class="num">0x3C</td><td>PE 헤더 위치</td></tr>
+                            <tr><td class="num">PE</td><td><code>PE\0\0</code> 서명</td></tr>
+                            <tr class="hot"><td class="num">PE + 4</td><td><b>Machine</b> 필드 2바이트</td></tr>
+                        </tbody>
+                    </table>
+                    <p class="note">빌드 출력 폴더마다 실행 파일을 찾아 아키텍처를 정하고, 같은 아키텍처가 두 번 들어오면 오류로 처리합니다.</p>
+                </div>
+                <div class="stack">
+                    <div class="code-caption"><span class="mono">Shared/Helpers/PeArchitectureDetector.cs</span></div>
+<pre class="code small" style="flex:1">stream.Seek(PeOffsetLocation, SeekOrigin.Begin);  <span class="cm">// 0x3C</span>
+<span class="kw">var</span> peOffset = reader.ReadInt32();
+
+stream.Seek(peOffset, SeekOrigin.Begin);
+<span class="kw">var</span> peSignature = reader.ReadUInt32();
+<span class="kw">if</span> (peSignature != PeSignature) <span class="kw">return</span> <span class="st">"Unknown"</span>;
+
+<span class="kw">var</span> machine = reader.ReadUInt16();
+<span class="hl"><span class="kw">return</span> machine <span class="kw">switch</span></span>
+{
+    0x8664 =&gt; <span class="st">"x64"</span>,
+    0x014C =&gt; <span class="st">"x86"</span>,
+    0xAA64 =&gt; <span class="st">"ARM64"</span>,
+    _ =&gt; <span class="st">"Unknown"</span>
+};</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 29. 매니페스트 읽기 ============ -->
+<section class="slide" data-title="MSIX 메타데이터 읽기">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>MSIX는 ZIP 형식이고, 번들 안에는 아키텍처별 MSIX가 들어 있습니다</h2>
+            <div class="row wide-left" style="flex:1">
+<pre class="code" style="font-size:22px;line-height:1.75"><b>App.msixbundle</b>
+├─ AppxMetadata/
+│  └─ <span class="kw">AppxBundleManifest.xml</span>   <span class="cm">이름, 게시자, 버전, 아키텍처 목록</span>
+├─ App_x64.msix
+│  ├─ <span class="kw">AppxManifest.xml</span>         <span class="cm">표시 이름, 게시자 표시 이름</span>
+│  └─ Assets/
+│     └─ <span class="kw">StoreLogo.scale-400.png</span> <span class="cm">가장 큰 scale을 아이콘으로</span>
+├─ App_arm64.msix
+└─ App_x86.msix</pre>
+                <div class="stack">
+                    <ul class="list">
+                        <li><code>ZipArchive</code>로 열고 <code>XDocument</code>로 매니페스트를 읽습니다.</li>
+                        <li>번들 안의 첫 애플리케이션 패키지를 <b>다시 <code>ZipArchive</code>로 열어</b> 표시 이름을 가져옵니다.</li>
+                        <li>로고는 여러 scale 가운데 가장 큰 이미지를 골라 설치 화면에 씁니다.</li>
+                    </ul>
+                    <p class="note push">추가 라이브러리 없이 BCL만으로 처리합니다.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 30. WinApp CLI ============ -->
+<section class="slide" data-title="WinApp CLI로 패키징">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>MSIX 패키징은 WinApp CLI로 처리합니다</h2>
+            <div class="flow tall">
+                <div class="step"><span class="key">준비</span><span class="value">폴더 복사</span><p>빌드 출력을 감지된 아키텍처 이름의 작업 폴더로 복사</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">아키텍처마다</span><span class="value mono" style="font-size:23px">manifest generate</span><p>표시 이름, 버전, 설명, 로고로 매니페스트 생성</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step ink"><span class="key">한 번에</span><span class="value mono" style="font-size:23px">pack</span><p>폴더가 하나면 <code>.msix</code>, 여러 개면 <code>.msixbundle</code></p></div>
+            </div>
+<pre class="code small">winapp.exe pack x64 ARM64 --executable MyApp.exe --cert cert.pfx --cert-password <span class="st">"********"</span></pre>
+            <div class="stamp push">인증서 하나를 여러 릴리스에 재사용하세요. 버전마다 새 인증서로 서명하면 사용자가 매번 새 인증서를 신뢰해야 합니다</div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 31. SFX 조립 ============ -->
+<section class="slide" data-title="SFX 템플릿 조립">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">생성기 내부 구조</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>MSIX를 아키텍처별 EXE로 조립합니다</h2>
+            <table class="tbl">
+                <thead><tr><th style="width:110px">순서</th><th style="width:420px">작업</th><th>내용</th></tr></thead>
+                <tbody>
+                    <tr><td class="num">1</td><td><b>템플릿 확인</b></td><td>GitHub Releases의 최신 SFX 템플릿을 받아 버전별로 캐시</td></tr>
+                    <tr><td class="num">2</td><td><b>아키텍처 교집합</b></td><td>사용자가 고른 아키텍처와 패키지에 실제로 든 아키텍처를 비교</td></tr>
+                    <tr class="hot"><td class="num">3</td><td><b>이전 산출물 정리</b></td><td>캐시를 재사용하므로 지난 실행의 패키지와 압축 파일을 먼저 삭제</td></tr>
+                    <tr><td class="num">4</td><td><b>압축</b></td><td><code>Package.msixbundle</code>을 복사하고 <code>Archive.7z</code> 생성</td></tr>
+                    <tr><td class="num">5</td><td><b>결합</b></td><td><code>copy /b</code>로 SFX 모듈, 설정, 압축 파일을 이어 붙임</td></tr>
+                    <tr><td class="num">6</td><td><b>묶기</b></td><td>EXE가 하나면 그대로, 여러 개면 <code>Installers.zip</code>으로</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 32. 데모 2 ============ -->
+<section class="slide" data-title="데모 2">
+    <div class="label section-label">
+        <div class="name"><span class="key">구간 6, 라이브 데모</span><h2>.NET 앱을<br>CLI로 패키징</h2></div>
+        <div class="contents">
+            <div class="cell"><span class="key">입력</span><span class="value">작은 WPF 앱 프로젝트</span></div>
+            <div class="cell"><span class="key">도구</span><span class="value"><code class="mono">dotnet publish</code>와 <code class="mono">aticmsixgen</code></span></div>
+            <div class="cell"><span class="key">출력</span><span class="value"><code class="mono">Installer-x64.exe</code>, <code class="mono">Installer-arm64.exe</code></span></div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 33. 데모 2 명령 ============ -->
+<section class="slide" data-title="CLI 파이프라인">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">데모: .NET 앱 CLI 파이프라인</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>빌드 출력에서 인스톨러를 만드는 명령</h2>
+<pre class="code small"><span class="cm"># 한 번만: 설치와 인증서 생성</span>
+dotnet tool install --global aticmsixgen
+aticmsixgen cert generate --publisher <span class="st">"Demo"</span> --output cert.pfx
+
+<span class="cm"># 릴리스마다</span>
+dotnet publish -c Release -r win-x64 -o out\x64
+dotnet publish -c Release -r win-arm64 -o out\arm64
+<span class="hl">aticmsixgen msix-quick-pack --display-name <span class="st">"Demo App"</span> --description <span class="st">"Demo"</span> --executable <span class="st">"DemoApp.exe"</span> `</span>
+<span class="hl">    -f out\x64 -f out\arm64 --cert E:\Demo\cert.pfx --version 1.0.0.0 -o Demo.msixbundle</span>
+<span class="hl">aticmsixgen exe-pack -i Demo.msixbundle -a arm64 -o Installer-arm64.exe</span></pre>
+            <div class="fields cols-3 push">
+                <div class="cell no-bottom"><span class="key">명령</span><span class="value mono" style="font-size:24px">cert generate</span><p>자체 서명 PFX 생성</p></div>
+                <div class="cell no-bottom"><span class="key">명령</span><span class="value mono" style="font-size:24px">msix-pack, msix-quick-pack</span><p>매니페스트 파일 또는 인라인 매개변수로 패키징</p></div>
+                <div class="cell no-bottom ink"><span class="key">명령</span><span class="value mono" style="font-size:24px">exe-pack</span><p>MSIX를 더블클릭 인스톨러로</p></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 데모 2-1. msix-quick-pack 결과 ============ -->
+<section class="slide" data-title="데모: msix-quick-pack">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">데모: .NET 앱 CLI 파이프라인</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2><span class="mono">msix-quick-pack</span> 실행 결과</h2>
+            <div class="row" style="grid-template-columns:1.7fr 1fr;align-items:start">
+                <img class="capture" src="assets/demo2-msix-quick-pack.png" alt="msix-quick-pack 실행 결과. ARM64와 x64 파일 복사, 아키텍처별 매니페스트 생성, 번들 생성과 서명, Demo.msixbundle 저장까지의 출력입니다." style="border:var(--rule)">
+                <ul class="list">
+                    <li>두 폴더의 <code>DemoApp.exe</code>에서 <b>ARM64</b>와 <b>x64</b>를 자동으로 감지합니다.</li>
+                    <li>아키텍처마다 매니페스트를 만들고 패키지를 하나씩 만듭니다.</li>
+                    <li>두 패키지를 <code>.msixbundle</code>로 묶고 인증서로 서명합니다.</li>
+                    <li>사용자가 지정한 것은 빌드 출력 폴더와 인증서 파일입니다.</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 데모 2-2. exe-pack 결과 ============ -->
+<section class="slide" data-title="데모: exe-pack">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">데모: .NET 앱 CLI 파이프라인</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2><span class="mono">exe-pack</span> 실행 결과</h2>
+            <img class="capture" src="assets/demo2-exe-pack.png" alt="exe-pack 실행 결과. 아키텍처 감지, 캐시된 SFX 템플릿 사용, Arm64 파일 압축, 인스톨러 조립 후 Installer-arm64.exe가 생성되었습니다." style="border:var(--rule);max-height:520px;width:auto;max-width:100%;align-self:flex-start">
+            <div class="fields cols-3 push">
+                <div class="cell no-bottom"><span class="key">템플릿</span><span class="value" style="font-size:25px">GitHub Releases의 SFX 템플릿을 캐시해서 재사용</span></div>
+                <div class="cell no-bottom"><span class="key">압축과 결합</span><span class="value" style="font-size:25px">7z 압축 후 SFX 모듈, 설정, 압축 파일을 결합</span></div>
+                <div class="cell no-bottom ink"><span class="key">결과</span><span class="value" style="font-size:25px">데모 1에서 사용한 것과 같은 형식의 <span class="mono">Installer-arm64.exe</span></span></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 34. 구간 7 ============ -->
+<section class="slide" data-title="구간: .NET 플랫폼 활용">
+    <div class="label section-label">
+        <div class="name"><span class="key">구간 7</span><h2>.NET 플랫폼<br>활용</h2></div>
+        <div class="contents">
+            <div class="cell"><span class="key">구조</span><span class="value">GUI와 CLI가 같은 코드를 씁니다</span></div>
+            <div class="cell"><span class="key">NativeAOT</span><span class="value">설치기와 CLI를 런타임 없이 실행</span></div>
+            <div class="cell"><span class="key">배포</span><span class="value">RID별 dotnet tool과 GitHub Actions</span></div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 35. 코드 공유 구조 ============ -->
+<section class="slide" data-title="코드 공유 구조">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">.NET 플랫폼 활용</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>GUI에서 공통 코드를 떼어 CLI와 나눠 씁니다</h2>
+            <div class="fields cols-2">
+                <div class="cell"><span class="key">WinUI 3 앱</span><span class="value mono" style="font-size:26px">MsixInstallerComposer</span><p>CommunityToolkit.Mvvm, DI, 페이지와 뷰모델</p></div>
+                <div class="cell"><span class="key">NativeAOT 콘솔 앱</span><span class="value mono" style="font-size:26px">aticmsixgen</span><p>System.CommandLine, Microsoft.Extensions.DependencyInjection</p></div>
+                <div class="cell ink no-bottom" style="grid-column:1 / span 2"><span class="key">공통 라이브러리, net10.0</span><span class="value mono" style="font-size:26px">MsixInstallerComposer.Shared</span><p>PE 아키텍처 감지, MSIX 매니페스트 읽기, WinApp CLI와 SFX 템플릿 다운로드, 프로세스 실행 도우미, 매니페스트 설정 모델</p></div>
+            </div>
+            <p class="lede push">UI에 묶인 코드는 서비스에 남기고, 파일과 프로세스만 다루는 코드는 <b>대상 프레임워크가 <code>net10.0</code>인 라이브러리</b>로 옮겼습니다. 그래서 CLI가 Windows App SDK 없이 빌드됩니다.</p>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 36. NativeAOT 전환 ============ -->
+<section class="slide" data-title="NativeAOT 전환에서 겪은 일">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">.NET 플랫폼 활용</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>NativeAOT로 가려면 리플렉션을 걷어내야 했습니다</h2>
+            <table class="tbl">
+                <thead><tr><th style="width:420px">걸림돌</th><th>바꾼 방법</th></tr></thead>
+                <tbody>
+                    <tr><td><b>JSON 직렬화</b></td><td>리플렉션 기반 직렬화 대신 <code>JsonSerializerContext</code> 소스 생성</td></tr>
+                    <tr><td><b>WinUI 지역화 라이브러리</b></td><td>리플렉션을 쓰는 외부 라이브러리를 걷어내고 MRT Core <code>ResourceLoader</code>로 교체</td></tr>
+                </tbody>
+            </table>
+            <div class="fields cols-3 push">
+                <div class="cell no-bottom"><span class="key">2025-12</span><span class="value">Installer와 Composer를 NativeAOT로 전환</span></div>
+                <div class="cell no-bottom"><span class="key">2026-07</span><span class="value">지역화를 MRT Core로 바꿔 남은 리플렉션 제거</span></div>
+                <div class="cell no-bottom ink"><span class="key">2026-07</span><span class="value"><code class="mono">aticmsixgen</code>도 처음부터 NativeAOT로</span></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 38. RID별 dotnet tool ============ -->
+<section class="slide" data-title="RID별 NativeAOT dotnet tool">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">.NET 플랫폼 활용</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>.NET 10부터 NativeAOT 실행 파일을 dotnet tool로 배포할 수 있습니다</h2>
+            <div class="code-caption"><span class="mono">MsixInstallerComposerCommandLine.csproj</span></div>
+<pre class="code small">&lt;<span class="kw">PublishAot</span>&gt;true&lt;/<span class="kw">PublishAot</span>&gt;
+&lt;<span class="kw">RuntimeIdentifiers</span>&gt;win-x86;win-x64;win-arm64&lt;/<span class="kw">RuntimeIdentifiers</span>&gt;
+<span class="hl">&lt;<span class="kw">ToolPackageRuntimeIdentifiers</span>&gt;$(RuntimeIdentifiers)&lt;/<span class="kw">ToolPackageRuntimeIdentifiers</span>&gt;</span>
+&lt;<span class="kw">PackAsTool</span>&gt;true&lt;/<span class="kw">PackAsTool</span>&gt;
+&lt;<span class="kw">ToolCommandName</span>&gt;aticmsixgen&lt;/<span class="kw">ToolCommandName</span>&gt;</pre>
+            <div class="fields cols-3">
+                <div class="cell no-bottom"><span class="key">패키지 구성</span><span class="value">기본 패키지 하나와 RID별 패키지 세 개</span></div>
+                <div class="cell no-bottom"><span class="key">설치하는 쪽</span><span class="value">자기 PC에 맞는 RID 패키지를 자동으로 받음</span></div>
+                <div class="cell no-bottom ink"><span class="key">결과</span><span class="value">.NET 런타임 없이 바로 실행되는 단일 실행 파일</span></div>
+            </div>
+<pre class="code push">dotnet tool install --global aticmsixgen</pre>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 39. GitHub Actions ============ -->
+<section class="slide" data-title="GitHub Actions 배포">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">.NET 플랫폼 활용</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>csproj 버전을 올려 push하면 NuGet에 자동으로 게시됩니다</h2>
+            <div class="flow">
+                <div class="step"><span class="key">1</span><span class="value">기본 패키지 pack</span><p>RID 패키지를 가리키는 진입점 패키지</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">2</span><span class="value">RID별 pack</span><p><code>win-x86</code>, <code>win-x64</code>, <code>win-arm64</code>를 NativeAOT로</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step"><span class="key">3</span><span class="value">패키지 검증</span><p>네 개가 모두 만들어졌는지 확인</p></div>
+                <div class="arrow"><svg viewBox="0 0 30 30" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 15h20M17 8l7 7-7 7"/></svg></div>
+                <div class="step ink"><span class="key">4</span><span class="value">NuGet push</span><p>nuget.org에 게시</p></div>
+            </div>
+<pre class="code small"><span class="kw">runs-on</span>: windows-latest
+<span class="cm"># ...</span>
+dotnet pack MsixInstallerComposerCommandLine.csproj -c Release -p:ContinuousIntegrationBuild=true
+dotnet pack MsixInstallerComposerCommandLine.csproj -c Release -p:Platform=<span class="st">$platform</span>   <span class="cm"># x86, x64, ARM64</span></pre>
+            <p class="lede push">데모 2의 명령을 같은 워크플로에 넣으면 앱 릴리스마다 인스톨러가 함께 만들어집니다.</p>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 40. 마무리 ============ -->
+<section class="slide" data-title="정리">
+    <div class="label">
+        <div class="label-head"><div><span class="key">구간</span><span class="value">마치며</span></div><div><span class="key">쪽</span><span class="page"></span></div></div>
+        <div class="label-body">
+            <h2>정리</h2>
+            <div class="fields cols-3">
+                <div class="cell no-bottom"><span class="key">MSIX</span><span class="value">가상화와 깨끗한 제거는 운영체제에 맡깁니다</span></div>
+                <div class="cell no-bottom"><span class="key">더블클릭 설치</span><span class="value">인증서 등록과 패키지 배포는 설치기가 처리하고, 사용자는 EXE를 실행해 설치합니다</span></div>
+                <div class="cell no-bottom ink"><span class="key">빌드 파이프라인</span><span class="value">빌드 결과물을 <span class="mono">aticmsixgen</span>으로 바로 인스톨러로 만들고, CI에서도 같은 명령을 씁니다</span></div>
+            </div>
+            <div class="fields cols-3 push">
+                <div class="cell no-bottom" style="flex-direction:row;align-items:center;gap:26px"><img src="assets/qr-github.png" alt="AT Installer GitHub 저장소 QR 코드" style="width:150px;height:150px"><div class="stack" style="gap:6px"><span class="key">소스 코드</span><span class="value mono" style="font-size:21px">github.com/airtaxi/<br>AT-Installer</span></div></div>
+                <div class="cell no-bottom" style="flex-direction:row;align-items:center;gap:26px"><img src="assets/qr-store.png" alt="Microsoft Store의 MSIX 인스톨러 생성기 QR 코드" style="width:150px;height:150px"><div class="stack" style="gap:6px"><span class="key">GUI 생성기</span><span class="value" style="font-size:24px">Microsoft Store<br>MSIX 인스톨러 생성기</span></div></div>
+                <div class="cell no-bottom" style="flex-direction:row;align-items:center;gap:26px"><img src="assets/qr-nuget.png" alt="NuGet의 aticmsixgen 패키지 QR 코드" style="width:150px;height:150px"><div class="stack" style="gap:6px"><span class="key">CLI</span><span class="value mono" style="font-size:21px">dotnet tool install<br>-g aticmsixgen</span></div></div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ============ 41. 감사합니다 ============ -->
+<section class="slide" data-title="감사합니다">
+    <div class="label title-label">
+        <div class="cell"><span class="key">보내는 사람</span><span class="value">이호원 <span class="mono">(airtaxi)</span></span></div>
+        <div class="cell"><span class="key">받는 곳</span><span class="value">대한민국 .NET Conf 2026</span></div>
+        <div class="cell last-col"><span class="key">상태</span><span class="value">배송 완료</span></div>
+        <div class="cell main">
+            <h1>감사합니다</h1>
+            <p class="sub">질문 받겠습니다</p>
+        </div>
+        <div class="cell sort-code last-col"><span class="key">GitHub</span><span class="big" style="font-size:64px">airtaxi</span></div>
+        <div class="cell last-row"><span class="key">소스 코드</span><span class="value mono" style="font-size:26px">github.com/airtaxi/AT-Installer</span></div>
+        <div class="cell last-row"><span class="key">CLI</span><span class="value mono" style="font-size:26px">aticmsixgen</span></div>
+        <div class="cell last-row last-col"><span class="key">라이선스</span><span class="value mono">MIT</span></div>
+    </div>
+</section>
+
+</main>
+</div>
+<div class="deck-controls"><span class="deck-counter" id="deckCounter"></span></div>
+
+<script>
+/* ===========================================
+   SLIDE PRESENTATION CONTROLLER
+   키보드(화살표, Space, Page Up/Down, Home/End), 마우스 휠, 터치 스와이프,
+   주소의 #번호와 현재 슬라이드를 동기화합니다.
+   =========================================== */
+class SlidePresentation {
+    constructor() {
+        this.slides = [...document.querySelectorAll('.slide')];
+        this.stage = document.getElementById('deckStage');
+        this.counter = document.getElementById('deckCounter');
+        this.startSlide = document.querySelector('.s-start');
+        this.pageCount = this.slides.length - 1;
+        this.currentSlide = 0;
+        this.isWheelLocked = false;
+        this.isUnboxing = false;
+        this.fillPageNumbers();
+        this.setupStageScale();
+        this.setupKeyboardNav();
+        this.setupWheelNav();
+        this.setupTouchNav();
+        document.getElementById('startBtn').addEventListener('click', () => this.start());
+        this.showSlide(this.readHashIndex());
+        window.addEventListener('hashchange', () => this.showSlide(this.readHashIndex()));
+    }
+
+    /* 라벨 머리 칸의 쪽 번호를 채웁니다. 시작 화면(0번)은 쪽 수에서 뺍니다 */
+    fillPageNumbers() {
+        this.slides.forEach((slide, index) => {
+            const page = slide.querySelector('.page');
+            if (page) page.textContent = `${index} / ${this.pageCount}`;
+        });
+    }
+
+    /* 주소의 #번호는 쪽 번호와 같습니다. 번호가 없으면 시작 화면입니다 */
+    readHashIndex() {
+        const number = parseInt(location.hash.replace('#', ''), 10);
+        return Number.isNaN(number) ? 0 : number;
+    }
+
+    /* 발표 시작: 전체 화면으로 바꾸고 상자를 연 뒤 제목 슬라이드로 넘어갑니다 */
+    start() {
+        if (this.isUnboxing) return;
+        const root = document.documentElement;
+        if (!document.fullscreenElement && root.requestFullscreen) root.requestFullscreen().catch(() => {});
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            this.showSlide(1);
+            return;
+        }
+        this.isUnboxing = true;
+        this.startSlide.classList.remove('packed');
+        this.startSlide.classList.add('unboxing');
+        setTimeout(() => {
+            this.isUnboxing = false;
+            this.showSlide(1);
+        }, 1550);
+    }
+
+    /* 시작 화면에 들어올 때마다 포장 애니메이션을 처음부터 재생합니다 */
+    replayPacking() {
+        this.startSlide.classList.remove('packed', 'unboxing');
+        this.startSlide.classList.add('packing');
+        void this.startSlide.offsetWidth;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            this.startSlide.classList.remove('packing');
+            this.startSlide.classList.add('packed');
+        }));
+    }
+
+    setupStageScale() {
+        const scale = () => {
+            const factor = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+            const x = (window.innerWidth - 1920 * factor) / 2;
+            const y = (window.innerHeight - 1080 * factor) / 2;
+            this.stage.style.transform = `translate(${x}px, ${y}px) scale(${factor})`;
+        };
+        scale();
+        window.addEventListener('resize', scale);
+    }
+
+    setupKeyboardNav() {
+        document.addEventListener('keydown', (event) => {
+            if (document.body.classList.contains('editing')) return;
+            const nextKeys = ['ArrowRight', 'ArrowDown', 'PageDown', ' ', 'Enter'];
+            const previousKeys = ['ArrowLeft', 'ArrowUp', 'PageUp', 'Backspace'];
+            if (this.isUnboxing) return;
+            if (nextKeys.includes(event.key) && this.currentSlide === 0) { event.preventDefault(); this.start(); }
+            else if (nextKeys.includes(event.key)) { event.preventDefault(); this.showSlide(this.currentSlide + 1); }
+            else if (previousKeys.includes(event.key)) { event.preventDefault(); this.showSlide(this.currentSlide - 1); }
+            else if (event.key === 'Home') this.showSlide(0);
+            else if (event.key === 'End') this.showSlide(this.slides.length - 1);
+        });
+    }
+
+    setupWheelNav() {
+        window.addEventListener('wheel', (event) => {
+            if (document.body.classList.contains('editing') || this.isWheelLocked || Math.abs(event.deltaY) < 30) return;
+            this.isWheelLocked = true;
+            this.showSlide(this.currentSlide + (event.deltaY > 0 ? 1 : -1));
+            setTimeout(() => { this.isWheelLocked = false; }, 600);
+        }, { passive: true });
+    }
+
+    setupTouchNav() {
+        let startX = 0;
+        let startY = 0;
+        window.addEventListener('touchstart', (event) => { startX = event.touches[0].clientX; startY = event.touches[0].clientY; }, { passive: true });
+        window.addEventListener('touchend', (event) => {
+            if (document.body.classList.contains('editing')) return;
+            const deltaX = event.changedTouches[0].clientX - startX;
+            const deltaY = event.changedTouches[0].clientY - startY;
+            if (Math.abs(deltaX) < 50 || Math.abs(deltaX) < Math.abs(deltaY)) return;
+            this.showSlide(this.currentSlide + (deltaX < 0 ? 1 : -1));
+        }, { passive: true });
+    }
+
+    showSlide(index) {
+        const previousSlide = this.currentSlide;
+        this.currentSlide = Math.max(0, Math.min(index, this.slides.length - 1));
+        this.slides.forEach((slide, slideIndex) => {
+            const isCurrent = slideIndex === this.currentSlide;
+            slide.classList.toggle('active', isCurrent);
+            slide.classList.toggle('visible', isCurrent);
+        });
+        const isStart = this.currentSlide === 0;
+        document.body.classList.toggle('deck-start', isStart);
+        if (isStart && (previousSlide !== 0 || !this.startSlide.classList.contains('packed'))) this.replayPacking();
+        this.counter.textContent = `${this.currentSlide} / ${this.pageCount}`;
+        const hash = isStart ? '' : `#${this.currentSlide}`;
+        if (location.hash !== hash) history.replaceState(null, '', hash || location.pathname + location.search);
+    }
+}
+
+/* ===========================================
+   INLINE EDITOR
+   편집 모드에서 텍스트를 바로 고치고, 브라우저 저장소에 자동 저장합니다.
+   Ctrl+S는 고친 내용이 반영된 HTML 파일을 내려받습니다.
+   =========================================== */
+class InlineEditor {
+    constructor() {
+        this.isActive = false;
+        this.storageKey = 'ati-slides-edits';
+        this.toggleButton = document.getElementById('editToggle');
+        this.editableElements = [...document.querySelectorAll('.deck-stage h1, .deck-stage h2, .deck-stage p, .deck-stage li, .deck-stage td, .deck-stage .value, .deck-stage .key, .deck-stage pre')];
+        this.restore();
+        this.setupControls();
+    }
+
+    restore() {
+        const saved = JSON.parse(localStorage.getItem(this.storageKey) || '{}');
+        Object.entries(saved).forEach(([index, html]) => {
+            const element = this.editableElements[Number(index)];
+            if (element) element.innerHTML = html;
+        });
+    }
+
+    save() {
+        const edits = {};
+        this.editableElements.forEach((element, index) => { edits[index] = element.innerHTML; });
+        localStorage.setItem(this.storageKey, JSON.stringify(edits));
+    }
+
+    toggleEditMode() {
+        this.isActive = !this.isActive;
+        document.body.classList.toggle('editing', this.isActive);
+        this.toggleButton.classList.toggle('active', this.isActive);
+        this.editableElements.forEach((element) => {
+            if (this.isActive) element.setAttribute('contenteditable', 'true');
+            else element.removeAttribute('contenteditable');
+        });
+        if (!this.isActive) this.save();
+    }
+
+    downloadHtml() {
+        this.save();
+        const wasActive = this.isActive;
+        if (wasActive) this.toggleEditMode();
+        const html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+        link.download = 'index.html';
+        link.click();
+        URL.revokeObjectURL(link.href);
+        if (wasActive) this.toggleEditMode();
+    }
+
+    setupControls() {
+        const hotzone = document.querySelector('.edit-hotzone');
+        let hideTimeout = null;
+        const hideLater = () => { hideTimeout = setTimeout(() => { if (!this.isActive) this.toggleButton.classList.remove('show'); }, 400); };
+
+        this.toggleButton.addEventListener('click', () => this.toggleEditMode());
+        hotzone.addEventListener('click', () => this.toggleEditMode());
+        hotzone.addEventListener('mouseenter', () => { clearTimeout(hideTimeout); this.toggleButton.classList.add('show'); });
+        hotzone.addEventListener('mouseleave', hideLater);
+        this.toggleButton.addEventListener('mouseenter', () => clearTimeout(hideTimeout));
+        this.toggleButton.addEventListener('mouseleave', hideLater);
+
+        document.addEventListener('keydown', (event) => {
+            const isTyping = event.target.getAttribute && event.target.getAttribute('contenteditable');
+            if ((event.key === 'e' || event.key === 'E') && !isTyping && !event.ctrlKey && !event.metaKey) this.toggleEditMode();
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); this.downloadHtml(); }
+        });
+        document.addEventListener('input', () => { if (this.isActive) this.save(); });
+    }
+}
+
+new SlidePresentation();
+new InlineEditor();
+</script>
+</body>
+</html>
