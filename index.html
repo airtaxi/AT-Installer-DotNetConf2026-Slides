@@ -171,11 +171,11 @@ svg {
     grid-template-rows: 92px minmax(0, 1fr);
 }
 .label-head { display: grid; grid-template-columns: 1fr 220px; border-bottom: var(--rule); }
-.label-head > div { padding: 16px 32px; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+.label-head > div { padding: 12px 32px; display: flex; flex-direction: column; justify-content: center; gap: 4px; min-height: 0; overflow: hidden; }
 .label-head > div + div { border-left: var(--rule); }
 .key { font-size: 20px; font-weight: 500; color: var(--ink-faint); line-height: 1.2; }
 .label-head .value { font-size: 26px; font-weight: 700; line-height: 1.2; }
-.label-head .page { font-family: var(--font-mono); font-size: 26px; font-weight: 700; }
+.label-head .page { font-size: 26px; font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .label-body { padding: 48px 64px 52px; display: flex; flex-direction: column; gap: 34px; min-height: 0; min-width: 0; }
 
 /* ===========================================
